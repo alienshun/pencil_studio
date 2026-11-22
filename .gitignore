@@ -1,0 +1,17 @@
+# Local generated works & uploaded reference images
+/works/
+**/reference.*
+**/order_mask.png
+**/finished.png
+**/process.webp
+**/meta.json
+
+# Build & dependencies
+node_modules/
+dist/
+.venv/
+__pycache__/
+
+# OS files
+.DS_Store
+Thumbs.db
