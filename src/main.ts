@@ -1,10 +1,20 @@
 import { renderInBrowser, type FinaleDirection, type SweepDirection } from './browser-engine'
+import { encodeMp4FromWebpBlob } from './media-export'
 import './styles.css'
 
 type BrushStage = 'finale' | 'early' | 'erase'
 type ToolShape = 'brush' | 'rect'
 type Photo = { image: HTMLImageElement; baseName: string }
-type Artwork = { finishedUrl: string; playback: HTMLCanvasElement[] | Blob; durationSec: 4 | 6 }
+type Artwork = {
+  finishedUrl: string
+  finishedBlob: Blob
+  playback: HTMLCanvasElement[] | Blob
+  animBlob: Blob | null
+  animExt: 'webp' | 'gif'
+  mp4Blob: Blob | null
+  durationSec: 4 | 6
+  baseName: string
+}
 
 const app = document.querySelector<HTMLElement>('#app')!
 
@@ -19,7 +29,9 @@ let activeRender: AbortController | null = null
 let artwork: Artwork | null = null
 let replayTimer: number | undefined
 let playbackObjectUrl = ''
+let downloadMp4ObjectUrl = ''
 let downloadWebpObjectUrl = ''
+let modalObjectUrl = ''
 
 app.innerHTML = `
   <header class="site-header">
@@ -159,6 +171,7 @@ app.innerHTML = `
           </div>
           <div class="action-group">
             <a id="download-png" class="file-btn" download="finished.png" hidden>⬇️ 下载彩铅成图 (.png)</a>
+            <a id="download-mp4" class="file-btn" download="process.mp4" hidden>🎬 下载绘画视频 (.mp4)</a>
             <a id="download-webp" class="file-btn" download="process.webp" hidden>⬇️ 下载回放动画 (.webp)</a>
           </div>
         </div>
@@ -252,6 +265,17 @@ app.innerHTML = `
     </div>
   </main>
 
+  <div class="save-modal-backdrop" id="save-modal" role="dialog" aria-modal="true" aria-labelledby="save-modal-title" hidden>
+    <div class="save-modal-card">
+      <div class="save-modal-head">
+        <h3 id="save-modal-title">保存到手机</h3>
+        <button type="button" class="ghost-btn" id="save-modal-close">关闭</button>
+      </div>
+      <p class="save-modal-tip" id="save-modal-tip"></p>
+      <div class="save-modal-body" id="save-modal-body"></div>
+    </div>
+  </div>
+
   <footer class="site-footer">
     <span>Copyright © 2026 alienshun</span>
   </footer>
@@ -276,8 +300,150 @@ const previewFrame = document.querySelector<HTMLElement>('#preview-frame')!
 const replayBtn = document.querySelector<HTMLButtonElement>('#replay-btn')!
 const compareBtn = document.querySelector<HTMLButtonElement>('#compare-btn')!
 const downloadPng = document.querySelector<HTMLAnchorElement>('#download-png')!
+const downloadMp4 = document.querySelector<HTMLAnchorElement>('#download-mp4')!
 const downloadWebp = document.querySelector<HTMLAnchorElement>('#download-webp')!
 const statusBox = document.querySelector<HTMLElement>('#status-box')!
+
+const saveModal = document.querySelector<HTMLElement>('#save-modal')!
+const saveModalTip = document.querySelector<HTMLElement>('#save-modal-tip')!
+const saveModalBody = document.querySelector<HTMLElement>('#save-modal-body')!
+const saveModalClose = document.querySelector<HTMLButtonElement>('#save-modal-close')!
+
+function isMobileDevice(): boolean {
+  const ua = navigator.userAgent || ''
+  const isTouchPad = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || isTouchPad
+}
+
+function isRestrictedInAppWebView(): boolean {
+  const ua = navigator.userAgent || ''
+  return /MicroMessenger|QQ\/|Weibo|BytedanceWebview|XHS/i.test(ua)
+}
+
+function closeSaveModal() {
+  saveModal.hidden = true
+  saveModalBody.replaceChildren()
+  if (modalObjectUrl) {
+    URL.revokeObjectURL(modalObjectUrl)
+    modalObjectUrl = ''
+  }
+}
+
+saveModalClose.addEventListener('click', closeSaveModal)
+saveModal.addEventListener('click', event => {
+  if (event.target === saveModal) closeSaveModal()
+})
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !saveModal.hidden) closeSaveModal()
+})
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error ?? new Error('Read failed'))
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function openMobileSaveModal(blob: Blob, filename: string) {
+  closeSaveModal()
+  saveModal.hidden = false
+
+  if (blob.type.startsWith('image/')) {
+    saveModalTip.textContent = '正在准备图片，长按下方画面即可保存到手机相册或发送给好友…'
+    try {
+      const dataUrl = await blobToDataUrl(blob)
+      if (saveModal.hidden) return
+      const img = new Image()
+      img.src = dataUrl
+      img.alt = filename
+      saveModalTip.textContent = '📱 请长按下方图片，选择「保存到手机 / 添加到照片」或直接发送给好友：'
+      saveModalBody.replaceChildren(img)
+    } catch {
+      modalObjectUrl = URL.createObjectURL(blob)
+      const img = new Image()
+      img.src = modalObjectUrl
+      img.alt = filename
+      saveModalTip.textContent = '📱 请长按下方图片保存到手机：'
+      saveModalBody.replaceChildren(img)
+    }
+    return
+  }
+
+  modalObjectUrl = URL.createObjectURL(blob)
+  const video = document.createElement('video')
+  video.src = modalObjectUrl
+  video.controls = true
+  video.playsInline = true
+  video.autoplay = true
+  video.loop = true
+  video.muted = true
+  saveModalTip.textContent =
+    '📱 当前应用内置浏览器限制直接下载视频文件。请点击页面右上角「···」选择「在默认浏览器中打开」保存高清 MP4 视频到相册，或关闭本窗口点击「下载回放动图」长按保存。'
+  saveModalBody.replaceChildren(video)
+}
+
+function bindMobileDownload(
+  anchor: HTMLAnchorElement,
+  getAsset: () => { blob: Blob | null; filename: string },
+) {
+  anchor.addEventListener('click', event => {
+    if (!isMobileDevice()) return
+    const { blob, filename } = getAsset()
+    if (!blob) return
+
+    // 1. Prefer native mobile Share Sheet (1-tap "Save Video" / "Save Image" to iOS/Android Photos)
+    if (typeof navigator.share === 'function' && typeof navigator.canShare === 'function') {
+      try {
+        const file = new File([blob], filename, { type: blob.type })
+        if (navigator.canShare({ files: [file] })) {
+          event.preventDefault()
+          void navigator.share({ files: [file], title: filename }).catch((err: unknown) => {
+            if (err instanceof DOMException && err.name === 'AbortError') return
+            void openMobileSaveModal(blob, filename)
+          })
+          return
+        }
+      } catch {
+        // Fall through to modal or standard download
+      }
+    }
+
+    // 2. In restricted WebViews (WeChat / QQ / Xiaohongshu), <a download> on blob: URLs fails silently
+    if (isRestrictedInAppWebView()) {
+      event.preventDefault()
+      void openMobileSaveModal(blob, filename)
+      return
+    }
+
+    // 3. Plain HTTP mobile browser (e.g. LAN dev server): allow native <a download>, plus offer long-press modal for images
+    if (blob.type.startsWith('image/')) {
+      statusBox.textContent = `📥 已触发「${filename}」下载。若希望直接长按存入手机相册，`
+      const openBtn = document.createElement('button')
+      openBtn.type = 'button'
+      openBtn.className = 'inline-link-btn'
+      openBtn.textContent = '点此打开长按保存图片'
+      openBtn.addEventListener('click', () => {
+        void openMobileSaveModal(blob, filename)
+      })
+      statusBox.append(openBtn)
+    }
+  })
+}
+
+bindMobileDownload(downloadPng, () => ({
+  blob: artwork?.finishedBlob ?? null,
+  filename: artwork ? `${artwork.baseName}-finished.png` : 'finished.png',
+}))
+bindMobileDownload(downloadMp4, () => ({
+  blob: artwork?.mp4Blob ?? null,
+  filename: artwork ? `${artwork.baseName}-process-${artwork.durationSec}s.mp4` : 'process.mp4',
+}))
+bindMobileDownload(downloadWebp, () => ({
+  blob: artwork?.animBlob ?? null,
+  filename: artwork ? `${artwork.baseName}-process-${artwork.durationSec}s.${artwork.animExt}` : 'process.webp',
+}))
 
 const loopbackDevelopment = import.meta.env.DEV && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
 let checkingMode = loopbackDevelopment
@@ -587,6 +753,11 @@ function stopPlayback() {
 
 function clearResult() {
   stopPlayback()
+  closeSaveModal()
+  if (downloadMp4ObjectUrl) {
+    URL.revokeObjectURL(downloadMp4ObjectUrl)
+    downloadMp4ObjectUrl = ''
+  }
   if (downloadWebpObjectUrl) {
     URL.revokeObjectURL(downloadWebpObjectUrl)
     downloadWebpObjectUrl = ''
@@ -598,7 +769,7 @@ function clearResult() {
   previewMetaTag.textContent = '等待生成'
   replayBtn.disabled = true
   compareBtn.disabled = true
-  for (const link of [downloadPng, downloadWebp]) {
+  for (const link of [downloadPng, downloadMp4, downloadWebp]) {
     link.hidden = true
     link.removeAttribute('href')
     link.removeAttribute('download')
@@ -665,7 +836,11 @@ function showOriginalOverlay(show: boolean) {
   }
 }
 
-compareBtn.addEventListener('pointerdown', () => showOriginalOverlay(true))
+compareBtn.addEventListener('pointerdown', event => {
+  event.preventDefault()
+  showOriginalOverlay(true)
+})
+compareBtn.addEventListener('contextmenu', event => event.preventDefault())
 window.addEventListener('pointerup', () => showOriginalOverlay(false))
 window.addEventListener('pointercancel', () => showOriginalOverlay(false))
 
@@ -687,7 +862,8 @@ renderBtn.addEventListener('click', async () => {
     let result: Artwork
     let marks: number
     let frameCount: number
-    let processUrl: string | undefined
+    let mp4Url: string | undefined
+    let animUrl: string | undefined
     if (import.meta.env.DEV && localPythonAvailable) {
       statusBox.textContent = `本机 Python 正在绘制 ${duration} 秒彩铅画与绘画过程…`
       previewMetaTag.textContent = '绘制中…'
@@ -717,11 +893,26 @@ renderBtn.addEventListener('click', async () => {
           !data.processUrl?.startsWith('data:image/webp;base64,')) {
         throw new Error('本机 Python 返回的图像格式无效。')
       }
-      const playback = await (await fetch(data.processUrl, { signal: job.signal })).blob()
-      result = {
-        finishedUrl: data.finishedUrl, playback, durationSec: duration,
+      const [finishedBlob, playback] = await Promise.all([
+        fetch(data.finishedUrl, { signal: job.signal }).then(r => r.blob()),
+        fetch(data.processUrl, { signal: job.signal }).then(r => r.blob()),
+      ])
+      const mp4Blob = await encodeMp4FromWebpBlob(playback, 80)
+      if (mp4Blob && !job.signal.aborted) {
+        downloadMp4ObjectUrl = URL.createObjectURL(mp4Blob)
+        mp4Url = downloadMp4ObjectUrl
       }
-      processUrl = data.processUrl
+      result = {
+        finishedUrl: data.finishedUrl,
+        finishedBlob,
+        playback,
+        animBlob: playback,
+        animExt: 'webp',
+        mp4Blob,
+        durationSec: duration,
+        baseName,
+      }
+      animUrl = data.processUrl
       marks = data.meta.marks
       frameCount = data.meta.frames
     } else {
@@ -740,32 +931,57 @@ renderBtn.addEventListener('click', async () => {
           statusBox.textContent = label
         },
       })
+      const animBlob = drawing.animation?.blob ?? null
+      const animExt = drawing.animation?.ext ?? 'webp'
       result = {
         finishedUrl: drawing.finishedDataUrl,
-        playback: drawing.processBlob ?? drawing.frames,
+        finishedBlob: drawing.finishedBlob,
+        playback: animBlob ?? drawing.frames,
+        animBlob,
+        animExt,
+        mp4Blob: drawing.mp4Blob,
         durationSec: duration,
+        baseName,
       }
-      if (drawing.processBlob && !job.signal.aborted) {
-        downloadWebpObjectUrl = URL.createObjectURL(drawing.processBlob)
-        processUrl = downloadWebpObjectUrl
+      if (drawing.mp4Blob && !job.signal.aborted) {
+        downloadMp4ObjectUrl = URL.createObjectURL(drawing.mp4Blob)
+        mp4Url = downloadMp4ObjectUrl
+      }
+      if (animBlob && !job.signal.aborted) {
+        downloadWebpObjectUrl = URL.createObjectURL(animBlob)
+        animUrl = downloadWebpObjectUrl
       }
       marks = drawing.marks
-      frameCount = drawing.frames.length
+      frameCount = drawing.frameCount
     }
 
     if (job.signal.aborted) return
     artwork = result
     const formattedMarks = marks.toLocaleString()
     previewMetaTag.textContent = `${formattedMarks} 笔 · ${duration} 秒（${frameCount} 帧）`
-    statusBox.textContent = `✅ 绘制完成！共 ${formattedMarks} 笔彩铅，时长 ${duration} 秒。可点击上方按钮重播或下载。`
+    statusBox.textContent = isMobileDevice()
+      ? `✅ 绘制完成！共 ${formattedMarks} 笔彩铅，时长 ${duration} 秒。点击上方按钮即可保存视频或动图到手机相册。`
+      : `✅ 绘制完成！共 ${formattedMarks} 笔彩铅，时长 ${duration} 秒。可点击上方按钮重播或下载。`
+
     downloadPng.href = result.finishedUrl
     downloadPng.download = `${baseName}-finished.png`
     downloadPng.hidden = false
-    if (processUrl) {
-      downloadWebp.href = processUrl
-      downloadWebp.download = `${baseName}-process-${duration}s.webp`
+
+    if (mp4Url) {
+      downloadMp4.href = mp4Url
+      downloadMp4.download = `${baseName}-process-${duration}s.mp4`
+      downloadMp4.hidden = false
+    }
+
+    if (animUrl) {
+      downloadWebp.href = animUrl
+      downloadWebp.download = `${baseName}-process-${duration}s.${result.animExt}`
+      downloadWebp.textContent = result.animExt === 'gif'
+        ? '⬇️ 下载回放动图 (.gif)'
+        : '⬇️ 下载回放动画 (.webp)'
       downloadWebp.hidden = false
     }
+
     replayBtn.disabled = false
     compareBtn.disabled = false
     playPreview()

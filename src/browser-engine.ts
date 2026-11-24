@@ -1,3 +1,5 @@
+import { encodeBestAnimatedImage, encodeMp4Video, type EncodedAnimation } from './media-export'
+
 export type SweepDirection = 'top-down' | 'left-right' | 'center-out' | 'edges-in'
 export type FinaleDirection = 'top-down' | 'left-right' | 'center-out'
 
@@ -14,106 +16,15 @@ export interface BrowserRenderOptions {
 
 export interface BrowserRenderResult {
   frames: HTMLCanvasElement[]
+  frameCount: number
   finishedDataUrl: string
-  processBlob: Blob | null
+  finishedBlob: Blob
+  animation: EncodedAnimation | null
+  mp4Blob: Blob | null
   marks: number
   durationSec: 4 | 6
   width: number
   height: number
-}
-
-function writeUInt24LE(buf: Uint8Array, offset: number, value: number) {
-  buf[offset] = value & 0xff
-  buf[offset + 1] = (value >>> 8) & 0xff
-  buf[offset + 2] = (value >>> 16) & 0xff
-}
-
-function extractWebpFramePayload(webpBytes: Uint8Array): Uint8Array | null {
-  if (webpBytes.byteLength < 20) return null
-  const tag = String.fromCharCode(webpBytes[0], webpBytes[1], webpBytes[2], webpBytes[3])
-  const fmt = String.fromCharCode(webpBytes[8], webpBytes[9], webpBytes[10], webpBytes[11])
-  if (tag !== 'RIFF' || fmt !== 'WEBP') return null
-
-  const view = new DataView(webpBytes.buffer, webpBytes.byteOffset, webpBytes.byteLength)
-  let offset = 12
-  while (offset + 8 <= webpBytes.byteLength) {
-    const fourCC = String.fromCharCode(
-      webpBytes[offset],
-      webpBytes[offset + 1],
-      webpBytes[offset + 2],
-      webpBytes[offset + 3],
-    )
-    const chunkSize = view.getUint32(offset + 4, true)
-    const paddedSize = chunkSize + (chunkSize & 1)
-    if (offset + 8 + paddedSize > webpBytes.byteLength) break
-    if (fourCC === 'VP8 ' || fourCC === 'VP8L') {
-      return webpBytes.subarray(offset, offset + 8 + paddedSize)
-    }
-    offset += 8 + paddedSize
-  }
-  return null
-}
-
-async function encodeAnimatedWebp(
-  frames: HTMLCanvasElement[],
-  width: number,
-  height: number,
-  frameMs = 80,
-  onProgress?: (percent: number, label: string) => void,
-): Promise<Blob | null> {
-  const framePayloads: Uint8Array[] = []
-  for (let i = 0; i < frames.length; i++) {
-    if (i % 10 === 0) {
-      onProgress?.(92 + Math.round((i / frames.length) * 7), '正在打包 WebP 动态回放…')
-    }
-    const blob = await new Promise<Blob | null>(resolve => frames[i].toBlob(resolve, 'image/webp', 0.84))
-    if (!blob || blob.type !== 'image/webp') return null
-    const bytes = new Uint8Array(await blob.arrayBuffer())
-    const payload = extractWebpFramePayload(bytes)
-    if (!payload) return null
-    framePayloads.push(payload)
-  }
-
-  // RIFF header (12) + VP8X chunk (18) + ANIM chunk (14) + sum of ANMF chunks (24 + payload)
-  const anmfTotal = framePayloads.reduce((sum, p) => sum + 24 + p.byteLength, 0)
-  const totalBytes = 12 + 18 + 14 + anmfTotal
-  const out = new Uint8Array(totalBytes)
-  const view = new DataView(out.buffer)
-
-  // 'RIFF' + fileSize + 'WEBP'
-  out.set([0x52, 0x49, 0x46, 0x46], 0)
-  view.setUint32(4, totalBytes - 8, true)
-  out.set([0x57, 0x45, 0x42, 0x50], 8)
-
-  // 'VP8X' chunk (10-byte payload)
-  out.set([0x56, 0x50, 0x38, 0x58], 12)
-  view.setUint32(16, 10, true)
-  out[20] = 0x02 // Animation flag
-  writeUInt24LE(out, 24, width - 1)
-  writeUInt24LE(out, 27, height - 1)
-
-  // 'ANIM' chunk (6-byte payload: BGRA paper background + loopCount = 1)
-  out.set([0x41, 0x4e, 0x49, 0x4d], 30)
-  view.setUint32(34, 6, true)
-  out.set([219, 240, 248, 255], 38)
-  view.setUint16(42, 1, true)
-
-  let pos = 44
-  for (const payload of framePayloads) {
-    // 'ANMF' chunk header (16-byte frame header + bitstream payload)
-    out.set([0x41, 0x4e, 0x4d, 0x46], pos)
-    view.setUint32(pos + 4, 16 + payload.byteLength, true)
-    writeUInt24LE(out, pos + 8, 0) // frameX = 0
-    writeUInt24LE(out, pos + 11, 0) // frameY = 0
-    writeUInt24LE(out, pos + 14, width - 1)
-    writeUInt24LE(out, pos + 17, height - 1)
-    writeUInt24LE(out, pos + 20, frameMs)
-    out[pos + 23] = 0x02 // Do not alpha-blend (full opaque frame overwrite)
-    out.set(payload, pos + 24)
-    pos += 24 + payload.byteLength
-  }
-
-  return new Blob([out], { type: 'image/webp' })
 }
 
 const PAPER: [number, number, number] = [248, 240, 219]
@@ -135,12 +46,67 @@ function directionalSweep(fx: number, fy: number, dir: SweepDirection | FinaleDi
   return fy + 0.04 * fx
 }
 
+function featherMask(src: Uint8Array, width: number, height: number, radius: number): Float32Array {
+  const r = Math.max(1, Math.round(radius))
+  const horiz = new Float32Array(width * height)
+  const out = new Float32Array(width * height)
+
+  for (let y = 0; y < height; y++) {
+    const row = y * width
+    let sum = 0
+    let count = 0
+    for (let x = 0; x <= Math.min(width - 1, r); x++) {
+      sum += src[row + x]
+      count++
+    }
+    for (let x = 0; x < width; x++) {
+      horiz[row + x] = sum / count
+      const left = x - r
+      const right = x + r + 1
+      if (left >= 0) {
+        sum -= src[row + left]
+        count--
+      }
+      if (right < width) {
+        sum += src[row + right]
+        count++
+      }
+    }
+  }
+
+  for (let x = 0; x < width; x++) {
+    let sum = 0
+    let count = 0
+    for (let y = 0; y <= Math.min(height - 1, r); y++) {
+      sum += horiz[y * width + x]
+      count++
+    }
+    for (let y = 0; y < height; y++) {
+      out[y * width + x] = sum / count
+      const top = y - r
+      const bottom = y + r + 1
+      if (top >= 0) {
+        sum -= horiz[top * width + x]
+        count--
+      }
+      if (bottom < height) {
+        sum += horiz[bottom * width + x]
+        count++
+      }
+    }
+  }
+  return out
+}
+
 export async function renderInBrowser(opts: BrowserRenderOptions): Promise<BrowserRenderResult> {
   const { image, maskCanvas, durationSec, baseDirection, finaleDirection, holdFinale, sketchFirst, onProgress } = opts
   const maxDim = 720
   const scale = Math.min(1, maxDim / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height))
-  const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale))
-  const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale))
+  // Prefer even dimensions so H.264 MP4 encoding needs zero extra padding/resizing
+  const rawWidth = Math.max(2, Math.round((image.naturalWidth || image.width) * scale))
+  const rawHeight = Math.max(2, Math.round((image.naturalHeight || image.height) * scale))
+  const width = rawWidth > 2 ? rawWidth & ~1 : rawWidth
+  const height = rawHeight > 2 ? rawHeight & ~1 : rawHeight
   const frameCount = durationSec === 6 ? 75 : 50
   const rand = mulberry32(1702)
 
@@ -165,6 +131,7 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
   const lum = new Float32Array(width * height)
   const earlyMask = new Uint8Array(width * height)
   const finaleMask = new Uint8Array(width * height)
+  let hasUserEarly = false
   let hasUserFinale = false
 
   for (let i = 0; i < width * height; i++) {
@@ -195,8 +162,13 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
       hasUserFinale = true
     } else if (ma > 40 && mb > 150 && mb > mr) {
       earlyMask[i] = 1
+      hasUserEarly = true
     }
   }
+
+  const featherRadius = Math.max(4, Math.min(width, height) * 0.015)
+  const earlyWeight = hasUserEarly ? featherMask(earlyMask, width, height, featherRadius) : new Float32Array(width * height)
+  const finaleWeight = hasUserFinale ? featherMask(finaleMask, width, height, featherRadius) : new Float32Array(width * height)
 
   let finMinX = 1, finMaxX = 0, finMinY = 1, finMaxY = 0
   for (let i = 0; i < width * height; i++) {
@@ -214,8 +186,10 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
   const finSpanX = Math.max(0.05, finMaxX - finMinX)
   const finSpanY = Math.max(0.05, finMaxY - finMinY)
   const finRadius = Math.max(0.05, Math.hypot(finSpanX, finSpanY) * 0.5)
+
   const power = new Float32Array(width * height)
   const tangent = new Float32Array(width * height)
+  const accentMask = new Uint8Array(width * height)
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
       const idx = y * width + x
@@ -224,12 +198,13 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
       const p = Math.hypot(dx, dy)
       power[idx] = p
       tangent[idx] = Math.atan2(dy, dx) + Math.PI / 2
-      if (!hasUserFinale) {
-        const pr = pigment[idx * 3]
-        const pb = pigment[idx * 3 + 2]
-        if (((pr - pb) > 38 && p > 2.2) || p > 7.2) {
-          finaleMask[idx] = 1
-        }
+      const pr = pigment[idx * 3]
+      const pb = pigment[idx * 3 + 2]
+      const autoAccent = ((pr - pb) > 38 && p > 2.2) || p > 7.2
+      if (hasUserFinale) {
+        if ((finaleWeight[idx] > 0.25 && p > 1.6) || autoAccent) accentMask[idx] = 1
+      } else if (autoAccent) {
+        accentMask[idx] = 1
       }
     }
   }
@@ -249,24 +224,25 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
   }
 
   const passes = [
-    { mode: 'construction', spacing: 2.1, length: 10, nib: 1, opacity: 0.48, begin: 0.00, end: 0.14 },
-    { mode: 'blocking', spacing: 4.0, length: 18, nib: 3.6, opacity: 0.72, begin: 0.07, end: 0.68 },
-    { mode: 'body', spacing: 2.8, length: 12, nib: 2.1, opacity: 0.74, begin: 0.15, end: 0.78 },
-    { mode: 'crosshatch', spacing: 2.5, length: 9.5, nib: 1.1, opacity: 0.64, begin: 0.22, end: 0.84 },
-    { mode: 'edge', spacing: 1.3, length: 4.8, nib: 1.0, opacity: 0.82, begin: 0.14, end: 0.83 },
-    { mode: 'finale', spacing: 1.0, length: 3.8, nib: 1.1, opacity: 0.92, begin: 0.76, end: 1.00 },
+    { mode: 'construction', spacing: 2.1, length: 10, nib: 1, opacity: 0.48 },
+    { mode: 'blocking', spacing: 4.0, length: 18, nib: 3.6, opacity: 0.72 },
+    { mode: 'body', spacing: 2.8, length: 12, nib: 2.1, opacity: 0.74 },
+    { mode: 'crosshatch', spacing: 2.5, length: 9.5, nib: 1.1, opacity: 0.64 },
+    { mode: 'edge', spacing: 1.3, length: 4.8, nib: 1.0, opacity: 0.82 },
+    { mode: 'finale', spacing: 1.0, length: 3.8, nib: 1.1, opacity: 0.92 },
   ]
 
   const strokes: Stroke[] = []
   for (const pass of passes) {
+    const threshold = pass.mode === 'edge' || pass.mode === 'finale' ? 18 : 23
     for (let gy = 0; gy < height; gy += pass.spacing) {
       for (let gx = 0; gx < width; gx += pass.spacing) {
         const x = Math.min(width - 1, Math.floor(gx + rand() * pass.spacing))
         const y = Math.min(height - 1, Math.floor(gy + rand() * pass.spacing))
         const idx = y * width + x
         const edge = power[idx]
-        const isEarly = earlyMask[idx] === 1
-        const isFinale = finaleMask[idx] === 1
+        const wEarly = earlyWeight[idx]
+        const wFinale = finaleWeight[idx]
 
         if (pass.mode === 'construction') {
           const minEdge = sketchFirst ? 2.6 : 4.2
@@ -274,7 +250,7 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
         } else if (pass.mode === 'edge') {
           if (edge <= 2.6 || rand() >= Math.min(0.95, Math.max(0.22, edge / 11))) continue
         } else if (pass.mode === 'finale') {
-          if (!isFinale) continue
+          if (accentMask[idx] !== 1) continue
         }
 
         const fx = x / width
@@ -292,13 +268,55 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
         const dx = Math.cos(angle) * span * 0.5
         const dy = Math.sin(angle) * span * 0.5
 
-        let pr = pigment[idx * 3]
-        let pg = pigment[idx * 3 + 1]
-        let pb = pigment[idx * 3 + 2]
+        const cR = pigment[idx * 3]
+        const cG = pigment[idx * 3 + 1]
+        const cB = pigment[idx * 3 + 2]
+
+        // Edge-stopping stroke clipping (prevents color bleeding across sharp boundaries)
+        let reachNeg = 1.0
+        let reachPos = 1.0
+        for (const step of [0.25, 0.5, 0.75, 1.0]) {
+          if (reachNeg === 1.0) {
+            const px = Math.max(0, Math.min(width - 1, Math.round(x - dx * step)))
+            const py = Math.max(0, Math.min(height - 1, Math.round(y - dy * step)))
+            const pIdx = (py * width + px) * 3
+            if (
+              Math.abs(pigment[pIdx] - cR) > threshold ||
+              Math.abs(pigment[pIdx + 1] - cG) > threshold ||
+              Math.abs(pigment[pIdx + 2] - cB) > threshold
+            ) {
+              reachNeg = step - 0.2
+            }
+          }
+          if (reachPos === 1.0) {
+            const px = Math.max(0, Math.min(width - 1, Math.round(x + dx * step)))
+            const py = Math.max(0, Math.min(height - 1, Math.round(y + dy * step)))
+            const pIdx = (py * width + px) * 3
+            if (
+              Math.abs(pigment[pIdx] - cR) > threshold ||
+              Math.abs(pigment[pIdx + 1] - cG) > threshold ||
+              Math.abs(pigment[pIdx + 2] - cB) > threshold
+            ) {
+              reachPos = step - 0.2
+            }
+          }
+        }
+
+        let pr = cR
+        let pg = cG
+        let pb = cB
+        let passOpacity = pass.opacity
         if (pass.mode === 'construction') {
-          pr = pr * 0.26 + 66
-          pg = pg * 0.26 + 63
-          pb = pb * 0.26 + 74
+          if (sketchFirst) {
+            pr = pr * 0.34 + 58
+            pg = pg * 0.34 + 54
+            pb = pb * 0.34 + 62
+            passOpacity = Math.min(0.9, passOpacity * 1.35)
+          } else {
+            pr = pr * 0.26 + 66
+            pg = pg * 0.26 + 63
+            pb = pb * 0.26 + 74
+          }
         } else if (pass.mode === 'blocking') {
           pr = pr * 0.89 + PAPER[0] * 0.11
           pg = pg * 0.89 + PAPER[1] * 0.11
@@ -308,7 +326,7 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
         pr = Math.max(0, Math.min(255, Math.round(pr + jitter)))
         pg = Math.max(0, Math.min(255, Math.round(pg + jitter)))
         pb = Math.max(0, Math.min(255, Math.round(pb + jitter)))
-        const alpha = +(pass.opacity * (0.8 + rand() * 0.2)).toFixed(2)
+        const alpha = +(passOpacity * (0.8 + rand() * 0.2)).toFixed(2)
 
         const rawBase = Math.max(0, Math.min(1, directionalSweep(fx, fy, baseDirection) + (rand() - 0.5) * 0.03))
         let localFin = 0
@@ -323,10 +341,10 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
         const useFinaleDelay = hasUserFinale && holdFinale
         const rankMap: Record<string, number> = {
           construction: 0.0,
-          blocking: 0.0,
-          body: 0.28,
-          crosshatch: 0.55,
-          edge: 0.78,
+          blocking: sketchFirst ? 0.0 : 0.16,
+          body: sketchFirst ? 0.28 : 0.38,
+          crosshatch: sketchFirst ? 0.55 : 0.60,
+          edge: sketchFirst ? 0.78 : 0.80,
           finale: 1.0,
         }
         const rank = rankMap[pass.mode] ?? 0.5
@@ -337,22 +355,26 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
           if (pass.mode === 'construction') {
             moment = 0.00 + 0.24 * rawBase
           } else if (useFinaleDelay) {
-            moment = isFinale ? 0.74 + cNormFin * 0.26 : 0.25 + cNorm * 0.49 * (isEarly ? 0.6 : 1)
+            const bodyTime = 0.25 + cNorm * 0.49 * (1 - 0.40 * wEarly)
+            const finaleTime = 0.74 + cNormFin * 0.26
+            moment = (1 - wFinale) * bodyTime + wFinale * finaleTime
           } else {
-            moment = 0.25 + cNorm * 0.75 * (isEarly ? 0.65 : 1)
+            moment = 0.25 + cNorm * 0.75 * (1 - 0.35 * wEarly)
           }
         } else if (useFinaleDelay) {
-          moment = isFinale ? 0.74 + cNormFin * 0.26 : cNorm * 0.72 * (isEarly ? 0.6 : 1)
+          const bodyTime = cNorm * 0.72 * (1 - 0.40 * wEarly)
+          const finaleTime = 0.74 + cNormFin * 0.26
+          moment = (1 - wFinale) * bodyTime + wFinale * finaleTime
         } else {
-          moment = cNorm * (isEarly ? 0.65 : 1)
+          moment = cNorm * (1 - 0.35 * wEarly)
         }
         const frame = Math.max(1, Math.min(frameCount - 1, 1 + Math.round(moment * (frameCount - 2))))
 
         strokes.push({
-          x0: x - dx,
-          y0: y - dy,
-          x1: x + dx,
-          y1: y + dy,
+          x0: x - dx * reachNeg,
+          y0: y - dy * reachNeg,
+          x1: x + dx * reachPos,
+          y1: y + dy * reachPos,
           color: `rgba(${pr},${pg},${pb},${alpha})`,
           width: Math.max(1, pass.nib / (1 + edge / 25)),
           frame,
@@ -368,7 +390,7 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
     batches[s.frame].push(s)
   }
 
-  onProgress?.(70, `正在逐帧渲染 ${frameCount} 帧彩铅纸面…`)
+  onProgress?.(68, `正在逐帧渲染 ${frameCount} 帧彩铅纸面…`)
   await new Promise(r => setTimeout(r, 16))
 
   const work = document.createElement('canvas')
@@ -396,15 +418,43 @@ export async function renderInBrowser(opts: BrowserRenderOptions): Promise<Brows
     frames.push(snap)
   }
 
-  onProgress?.(92, '正在打包 WebP 动态回放…')
+  const lastFrame = frames[frames.length - 1]
+  const finishedDataUrl = lastFrame.toDataURL('image/png')
+  const finishedBlob =
+    (await new Promise<Blob | null>(r => lastFrame.toBlob(r, 'image/png'))) ??
+    (await (await fetch(finishedDataUrl)).blob())
+
+  onProgress?.(90, '正在生成动态回放与视频文件…')
   await new Promise(r => setTimeout(r, 16))
-  const processBlob = await encodeAnimatedWebp(frames, width, height, 80, onProgress)
+
+  const animation = await encodeBestAnimatedImage(frames, width, height, 80, onProgress)
+  const mp4Blob = await encodeMp4Video(frames, width, height, 80, onProgress)
+
+  // Free ~100MB of offscreen canvas backing stores on mobile once animated Blob is ready
+  let retainedFrames: HTMLCanvasElement[] = frames
+  if (animation) {
+    for (const snap of frames) {
+      snap.width = 0
+      snap.height = 0
+    }
+    retainedFrames = []
+  }
+
+  work.width = 0
+  work.height = 0
+  srcCanvas.width = 0
+  srcCanvas.height = 0
+  maskTmp.width = 0
+  maskTmp.height = 0
 
   onProgress?.(100, '完成')
   return {
-    frames,
-    finishedDataUrl: frames[frames.length - 1].toDataURL('image/png'),
-    processBlob,
+    frames: retainedFrames,
+    frameCount,
+    finishedDataUrl,
+    finishedBlob,
+    animation,
+    mp4Blob,
     marks: strokes.length,
     durationSec,
     width,

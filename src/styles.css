@@ -450,6 +450,86 @@ html, body {
   max-height: 112px;
 }
 
+#compare-btn {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+
+.inline-link-btn {
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--gold);
+  text-underline-offset: 0.22em;
+}
+
+.save-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(24, 22, 18, 0.62);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.save-modal-card {
+  width: min(100%, 460px);
+  max-height: 90vh;
+  overflow: auto;
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  padding: 18px;
+  box-shadow: 0 16px 40px rgba(16, 15, 12, 0.35);
+}
+
+.save-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.save-modal-head h3 {
+  margin: 0;
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: 19px;
+}
+
+.save-modal-tip {
+  margin: 12px 0;
+  font-size: 13px;
+  color: var(--soft);
+  line-height: 1.55;
+}
+
+.save-modal-body {
+  background: #efeadd;
+  border: 1px solid var(--line);
+  padding: 10px;
+  display: grid;
+  place-items: center;
+}
+
+.save-modal-body img,
+.save-modal-body video {
+  display: block;
+  max-width: 100%;
+  max-height: 58vh;
+  width: auto;
+  height: auto;
+}
+
 .site-footer {
   text-align: center;
   padding: 18px 16px 28px;
@@ -462,5 +542,34 @@ html, body {
 @media (max-width: 960px) {
   .studio-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .panel {
+    padding: 16px;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-stage {
+    min-height: 260px;
+    padding: 10px;
+  }
+
+  .preview-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .preview-toolbar .action-group {
+    width: 100%;
+  }
+
+  .preview-toolbar .action-group > * {
+    flex: 1 1 auto;
+    justify-content: center;
   }
 }

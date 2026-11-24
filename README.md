@@ -6,7 +6,7 @@ Choose a photo, then box-select or paint on the canvas the “① First-drawn ar
 
 Open the website and you can draw. Photos, stroke-order masks, and artworks are all processed within the current browser tab. Even if two people open the same URL at the same time, each draws on their own device. GitHub Pages serves the HTML, JavaScript, and stylesheet files. Selecting photos, drawing, and playback do not trigger GitHub Actions.
 
-The online version generates directly in the browser and can download a static PNG image and a multi-frame WebP playback animation (`process.webp`). To keep your artwork, download it before changing the photo or closing the webpage; to use higher 1080px precision and paper-tooth embossing, use the local Python mode below.
+The online version generates directly in the browser and can download a static PNG image, an MP4 drawing-process video, and a multi-frame playback animation (`.webp`, with automatic `.gif` fallback on iOS/Safari and native mobile share-sheet support for saving directly to Photos). To keep your artwork, download it before changing the photo or closing the webpage; to use higher 1080px precision and paper-tooth embossing, use the local Python mode below.
 
 ### Build and Publish
 
