@@ -319,6 +319,12 @@ html, body {
   font-size: 13px;
 }
 
+.style-group {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
 .duration-group {
   display: grid;
   grid-template-columns: 1fr 1fr;

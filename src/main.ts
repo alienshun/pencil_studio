@@ -1,4 +1,4 @@
-import { renderInBrowser, type FinaleDirection, type SweepDirection } from './browser-engine'
+import { renderInBrowser, type ArtStyle, type FinaleDirection, type SweepDirection } from './browser-engine'
 import { encodeMp4FromWebpBlob } from './media-export'
 import './styles.css'
 
@@ -6,6 +6,7 @@ type BrushStage = 'finale' | 'early' | 'erase'
 type ToolShape = 'brush' | 'rect'
 type Photo = { image: HTMLImageElement; baseName: string }
 type Artwork = {
+  style: ArtStyle
   finishedUrl: string
   finishedBlob: Blob
   playback: HTMLCanvasElement[] | Blob
@@ -16,9 +17,41 @@ type Artwork = {
   baseName: string
 }
 
+const STYLE_META: Record<ArtStyle, {
+  name: string
+  shortName: string
+  sketchFirstHtml: string
+}> = {
+  'colored-pencil': {
+    name: '彩铅画',
+    shortName: '彩铅',
+    sketchFirstHtml: '<b>✏️ 先画出全图线稿骨架，再逐步填色</b>（前 24% 时间先在白纸上勾出包含五官的完整铅笔素描骨架，再按 ① → ② → ③ 顺序层层上色）',
+  },
+  sketch: {
+    name: '素描画',
+    shortName: '素描',
+    sketchFirstHtml: '<b>✏️ 先勾勒全图结构线稿，再逐步铺排明暗调子</b>（前 24% 时间先在素描纸上勾出完整轮廓骨架，再按 ① → ② → ③ 顺序层层排线深入）',
+  },
+  oil: {
+    name: '油画',
+    shortName: '油画',
+    sketchFirstHtml: '<b>🖌️ 先用松节油熟褐起稿，再逐层厚涂上色</b>（前 24% 时间先在亚麻画布上勾出熟褐结构底稿，再按 ① → ② → ③ 顺序层层厚涂塑造）',
+  },
+}
+
+function artworkFilenames(baseName: string, style: ArtStyle, durationSec: 4 | 6, animExt: 'webp' | 'gif') {
+  const suffix = style === 'sketch' ? '-sketch' : style === 'oil' ? '-oil' : ''
+  return {
+    png: style === 'colored-pencil' ? `${baseName}-finished.png` : `${baseName}${suffix}.png`,
+    mp4: `${baseName}${suffix}-process-${durationSec}s.mp4`,
+    anim: `${baseName}${suffix}-process-${durationSec}s.${animExt}`,
+  }
+}
+
 const app = document.querySelector<HTMLElement>('#app')!
 
 let localPythonAvailable = false
+let artStyle: ArtStyle = 'colored-pencil'
 let brushStage: BrushStage = 'finale'
 let toolShape: ToolShape = 'rect'
 let brushSize = 28
@@ -110,6 +143,15 @@ app.innerHTML = `
 
       <div class="settings-grid">
         <div class="field full">
+          <label>艺术画风选择</label>
+          <div class="style-group">
+            <button type="button" class="chip-btn" data-style="colored-pencil" aria-pressed="true" style="justify-content:center;">🖍️ 彩铅画（温暖叠色）</button>
+            <button type="button" class="chip-btn" data-style="sketch" aria-pressed="false" style="justify-content:center;">✏️ 铅笔素描（明暗排线）</button>
+            <button type="button" class="chip-btn" data-style="oil" aria-pressed="false" style="justify-content:center;">🎨 厚涂油画（肌理笔触）</button>
+          </div>
+        </div>
+
+        <div class="field full">
           <label>绘画回放时长</label>
           <div class="duration-group">
             <button type="button" class="chip-btn" data-duration="4" aria-pressed="true" style="justify-content:center;">⏱️ 4 秒（50 帧）</button>
@@ -139,7 +181,7 @@ app.innerHTML = `
         <div class="field full">
           <label class="checkbox-row">
             <input id="sketch-first" type="checkbox" checked />
-            <span><b>✏️ 先画出全图线稿骨架，再逐步填色</b>（前 24% 时间先在白纸上勾出包含五官的完整铅笔素描骨架，再按 ① → ② → ③ 顺序层层上色）</span>
+            <span id="sketch-first-desc"><b>✏️ 先画出全图线稿骨架，再逐步填色</b>（前 24% 时间先在白纸上勾出包含五官的完整铅笔素描骨架，再按 ① → ② → ③ 顺序层层上色）</span>
           </label>
         </div>
       </div>
@@ -152,7 +194,7 @@ app.innerHTML = `
     <div class="right-column">
       <section class="panel">
         <div class="panel-head">
-          <h2>2. 彩铅成图与绘画过程回放</h2>
+          <h2 id="preview-title">2. 彩铅成图与绘画过程回放</h2>
           <span class="step-tag" id="preview-meta-tag">等待生成</span>
         </div>
 
@@ -292,8 +334,10 @@ const maskCanvas = document.querySelector<HTMLCanvasElement>('#mask-canvas')!
 const baseDirSelect = document.querySelector<HTMLSelectElement>('#base-direction')!
 const finaleDirSelect = document.querySelector<HTMLSelectElement>('#finale-direction')!
 const sketchFirstInput = document.querySelector<HTMLInputElement>('#sketch-first')!
+const sketchFirstDesc = document.querySelector<HTMLElement>('#sketch-first-desc')!
 const renderBtn = document.querySelector<HTMLButtonElement>('#render-btn')!
 
+const previewTitle = document.querySelector<HTMLElement>('#preview-title')!
 const previewMetaTag = document.querySelector<HTMLElement>('#preview-meta-tag')!
 const previewEmpty = document.querySelector<HTMLElement>('#preview-empty')!
 const previewFrame = document.querySelector<HTMLElement>('#preview-frame')!
@@ -434,15 +478,21 @@ function bindMobileDownload(
 
 bindMobileDownload(downloadPng, () => ({
   blob: artwork?.finishedBlob ?? null,
-  filename: artwork ? `${artwork.baseName}-finished.png` : 'finished.png',
+  filename: artwork
+    ? artworkFilenames(artwork.baseName, artwork.style, artwork.durationSec, artwork.animExt).png
+    : 'finished.png',
 }))
 bindMobileDownload(downloadMp4, () => ({
   blob: artwork?.mp4Blob ?? null,
-  filename: artwork ? `${artwork.baseName}-process-${artwork.durationSec}s.mp4` : 'process.mp4',
+  filename: artwork
+    ? artworkFilenames(artwork.baseName, artwork.style, artwork.durationSec, artwork.animExt).mp4
+    : 'process.mp4',
 }))
 bindMobileDownload(downloadWebp, () => ({
   blob: artwork?.animBlob ?? null,
-  filename: artwork ? `${artwork.baseName}-process-${artwork.durationSec}s.${artwork.animExt}` : 'process.webp',
+  filename: artwork
+    ? artworkFilenames(artwork.baseName, artwork.style, artwork.durationSec, artwork.animExt).anim
+    : 'process.webp',
 }))
 
 const loopbackDevelopment = import.meta.env.DEV && ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname)
@@ -534,7 +584,12 @@ async function loadPhotoFile(file: File) {
       canvas.height = height
     }
     photoCanvas.getContext('2d')!.drawImage(image, 0, 0, width, height)
-    const baseName = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]+/g, '-') || 'drawing'
+    const baseName =
+      file.name
+        .replace(/\.[^.]+$/, '')
+        .replace(/[^a-zA-Z0-9_\-\u4e00-\u9fa5]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80) || 'drawing'
     selectedPhoto = { image, baseName }
     emptyHint.hidden = true
     canvasStack.hidden = false
@@ -587,6 +642,31 @@ document.querySelectorAll<HTMLButtonElement>('[data-shape]').forEach(btn => {
   })
 })
 
+function syncStyleLabels() {
+  const meta = STYLE_META[artStyle]
+  sketchFirstDesc.innerHTML = meta.sketchFirstHtml
+  renderBtn.textContent = `✨ 开始生成${meta.name}与绘画过程`
+  if (!artwork) {
+    previewTitle.textContent = `2. ${meta.shortName}成图与绘画过程回放`
+    previewEmpty.innerHTML = `左侧选好照片并点击「开始生成」后，<br />这里会自动播放 4 秒或 6 秒的逐笔${meta.shortName}绘画过程，播完展示高清静态成图。`
+  }
+}
+
+document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const picked = btn.dataset.style
+    artStyle = picked === 'sketch' || picked === 'oil' ? picked : 'colored-pencil'
+    document.querySelectorAll<HTMLButtonElement>('[data-style]').forEach(b => {
+      b.setAttribute('aria-pressed', String(b === btn))
+    })
+    syncStyleLabels()
+    if (selectedPhoto && !activeRender) {
+      const meta = STYLE_META[artStyle]
+      statusBox.textContent = `已切换为「${meta.name}」画风，请点击「✨ 开始生成${meta.name}与绘画过程」查看效果。`
+    }
+  })
+})
+
 document.querySelectorAll<HTMLButtonElement>('[data-duration]').forEach(btn => {
   btn.addEventListener('click', () => {
     durationSec = Number(btn.dataset.duration) === 6 ? 6 : 4
@@ -603,7 +683,8 @@ brushSizeInput.addEventListener('input', () => {
 for (const control of [baseDirSelect, finaleDirSelect, sketchFirstInput]) {
   control.addEventListener('change', () => {
     if (selectedPhoto && !activeRender) {
-      statusBox.textContent = '绘画顺序设置已更新，请点击「✨ 开始生成彩铅画与绘画过程」查看新效果。'
+      const meta = STYLE_META[artStyle]
+      statusBox.textContent = `绘画顺序设置已更新，请点击「✨ 开始生成${meta.name}与绘画过程」查看新效果。`
     }
   })
 }
@@ -740,7 +821,10 @@ function exportCleanMaskDataUrl(): string | null {
     }
   }
   oCtx.putImageData(dst, 0, 0)
-  return out.toDataURL('image/png')
+  const maskUrl = out.toDataURL('image/png')
+  out.width = 0
+  out.height = 0
+  return maskUrl
 }
 
 function stopPlayback() {
@@ -767,6 +851,7 @@ function clearResult() {
   previewFrame.hidden = true
   previewEmpty.hidden = false
   previewMetaTag.textContent = '等待生成'
+  syncStyleLabels()
   replayBtn.disabled = true
   compareBtn.disabled = true
   for (const link of [downloadPng, downloadMp4, downloadWebp]) {
@@ -779,17 +864,18 @@ function clearResult() {
 function playPreview() {
   stopPlayback()
   if (!artwork) return
-  const { finishedUrl, playback, durationSec } = artwork
+  const { style, finishedUrl, playback, durationSec } = artwork
+  const styleMeta = STYLE_META[style]
   previewEmpty.hidden = true
   previewFrame.hidden = false
 
   if (playback instanceof Blob) {
     const still = new Image()
     still.src = finishedUrl
-    still.alt = '彩铅静态成图'
+    still.alt = `${styleMeta.shortName}静态成图`
 
     const anim = new Image()
-    anim.alt = '彩铅绘画过程'
+    anim.alt = `${styleMeta.shortName}绘画过程`
     playbackObjectUrl = URL.createObjectURL(playback)
     anim.src = playbackObjectUrl
     previewFrame.replaceChildren(anim)
@@ -847,8 +933,11 @@ window.addEventListener('pointercancel', () => showOriginalOverlay(false))
 renderBtn.addEventListener('click', async () => {
   if (!selectedPhoto || activeRender || checkingMode) return
   const { image, baseName } = selectedPhoto
+  const style = artStyle
+  const styleMeta = STYLE_META[style]
   const duration = durationSec
   const options = {
+    style,
     baseDirection: baseDirSelect.value as SweepDirection,
     finaleDirection: finaleDirSelect.value as FinaleDirection,
     holdFinale: true,
@@ -865,13 +954,16 @@ renderBtn.addEventListener('click', async () => {
     let mp4Url: string | undefined
     let animUrl: string | undefined
     if (import.meta.env.DEV && localPythonAvailable) {
-      statusBox.textContent = `本机 Python 正在绘制 ${duration} 秒彩铅画与绘画过程…`
+      statusBox.textContent = `本机 Python 正在绘制 ${duration} 秒${styleMeta.name}与绘画过程…`
       previewMetaTag.textContent = '绘制中…'
       const pixels = document.createElement('canvas')
       const { width, height } = scaledSize(image, 1080)
       pixels.width = width
       pixels.height = height
       pixels.getContext('2d')!.drawImage(image, 0, 0, width, height)
+      const imageDataUrl = pixels.toDataURL('image/png')
+      pixels.width = 0
+      pixels.height = 0
       const response = await fetch('./api/render', {
         method: 'POST',
         mode: 'same-origin',
@@ -881,7 +973,7 @@ renderBtn.addEventListener('click', async () => {
         signal: job.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          imageDataUrl: pixels.toDataURL('image/png'),
+          imageDataUrl,
           maskDataUrl: exportCleanMaskDataUrl(),
           duration,
           ...options,
@@ -903,6 +995,7 @@ renderBtn.addEventListener('click', async () => {
         mp4Url = downloadMp4ObjectUrl
       }
       result = {
+        style,
         finishedUrl: data.finishedUrl,
         finishedBlob,
         playback,
@@ -931,9 +1024,12 @@ renderBtn.addEventListener('click', async () => {
           statusBox.textContent = label
         },
       })
+      mask.width = 0
+      mask.height = 0
       const animBlob = drawing.animation?.blob ?? null
       const animExt = drawing.animation?.ext ?? 'webp'
       result = {
+        style,
         finishedUrl: drawing.finishedDataUrl,
         finishedBlob: drawing.finishedBlob,
         playback: animBlob ?? drawing.frames,
@@ -957,25 +1053,28 @@ renderBtn.addEventListener('click', async () => {
 
     if (job.signal.aborted) return
     artwork = result
+    previewTitle.textContent = `2. ${styleMeta.shortName}成图与绘画过程回放`
     const formattedMarks = marks.toLocaleString()
-    previewMetaTag.textContent = `${formattedMarks} 笔 · ${duration} 秒（${frameCount} 帧）`
+    previewMetaTag.textContent = `${styleMeta.shortName} · ${formattedMarks} 笔 · ${duration} 秒（${frameCount} 帧）`
     statusBox.textContent = isMobileDevice()
-      ? `✅ 绘制完成！共 ${formattedMarks} 笔彩铅，时长 ${duration} 秒。点击上方按钮即可保存视频或动图到手机相册。`
-      : `✅ 绘制完成！共 ${formattedMarks} 笔彩铅，时长 ${duration} 秒。可点击上方按钮重播或下载。`
+      ? `✅ 绘制完成！共 ${formattedMarks} 笔${styleMeta.shortName}，时长 ${duration} 秒。点击上方按钮即可保存视频或动图到手机相册。`
+      : `✅ 绘制完成！共 ${formattedMarks} 笔${styleMeta.shortName}，时长 ${duration} 秒。可点击上方按钮重播或下载。`
 
+    const filenames = artworkFilenames(baseName, style, duration, result.animExt)
     downloadPng.href = result.finishedUrl
-    downloadPng.download = `${baseName}-finished.png`
+    downloadPng.download = filenames.png
+    downloadPng.textContent = `⬇️ 下载${styleMeta.shortName}成图 (.png)`
     downloadPng.hidden = false
 
     if (mp4Url) {
       downloadMp4.href = mp4Url
-      downloadMp4.download = `${baseName}-process-${duration}s.mp4`
+      downloadMp4.download = filenames.mp4
       downloadMp4.hidden = false
     }
 
     if (animUrl) {
       downloadWebp.href = animUrl
-      downloadWebp.download = `${baseName}-process-${duration}s.${result.animExt}`
+      downloadWebp.download = filenames.anim
       downloadWebp.textContent = result.animExt === 'gif'
         ? '⬇️ 下载回放动图 (.gif)'
         : '⬇️ 下载回放动画 (.webp)'

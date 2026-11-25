@@ -10,7 +10,7 @@ const ENGINE_SCRIPT = path.join(ROOT, 'engine', 'draw.py')
 const MAX_BODY_BYTES = 14 * 1024 * 1024 // 14 MB JSON body cap
 const MAX_PHOTO_BYTES = 6 * 1024 * 1024
 const MAX_MASK_BYTES = 3 * 1024 * 1024
-const RENDER_TIMEOUT_MS = 35_000
+const RENDER_TIMEOUT_MS = 45_000
 const ALLOWED_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
@@ -118,6 +118,8 @@ function pencilPythonBridge(): Plugin {
         if (!url || (url.pathname !== '/api/ping' && url.pathname !== '/api/render')) return next()
 
         res.setHeader('Cache-Control', 'no-store')
+        res.setHeader('X-Content-Type-Options', 'nosniff')
+        res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
         res.setHeader('Content-Type', 'application/json; charset=utf-8')
 
         if (req.method === 'GET' && url.pathname === '/api/ping') {
@@ -181,6 +183,9 @@ function pencilPythonBridge(): Plugin {
 
             try {
               const payload = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
+              const style = ['colored-pencil', 'sketch', 'oil'].includes(payload.style)
+                ? payload.style
+                : 'colored-pencil'
               const duration = Number(payload.duration) === 6 ? 6 : 4
               const baseDirection = ['top-down', 'left-right', 'center-out', 'edges-in'].includes(payload.baseDirection)
                 ? payload.baseDirection
@@ -200,6 +205,7 @@ function pencilPythonBridge(): Plugin {
                 ENGINE_SCRIPT,
                 '--reference', '-',
                 '--output', '-',
+                '--style', style,
                 '--duration', String(duration),
                 '--direction', baseDirection,
                 '--finale-direction', finaleDirection,
@@ -253,7 +259,7 @@ function pencilPythonBridge(): Plugin {
 
             const outChunks: Buffer[] = []
             let outBytes = 0
-            const MAX_STDOUT_BYTES = 28 * 1024 * 1024
+            const MAX_STDOUT_BYTES = 36 * 1024 * 1024
 
             py.stdout.on('data', (chunk: Buffer) => {
               outBytes += chunk.length
@@ -314,5 +320,9 @@ function pencilPythonBridge(): Plugin {
 
 export default defineConfig({
   base: './',
+  server: {
+    host: '127.0.0.1',
+    cors: false,
+  },
   plugins: [pencilPythonBridge()],
 })

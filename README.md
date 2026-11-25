@@ -1,6 +1,6 @@
 # Pencil Studio
 
-Choose a photo, then box-select or paint on the canvas the “① First-drawn area → ② Main subject area → ③ Final accent area” to generate a colored pencil drawing and a 4-second (50-frame) or 6-second (75-frame) drawing playback.
+Choose a photo, pick an art style (**Colored Pencil**, **Graphite Sketch**, or **Impasto Oil Painting**), and box-select or paint on the canvas the “① First-drawn area → ② Main subject area → ③ Final accent area” to generate an artwork and a 4-second (50-frame) or 6-second (75-frame) procedural drawing playback.
 
 ## Online Use · GitHub Pages
 
